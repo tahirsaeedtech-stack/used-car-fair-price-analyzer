@@ -19,6 +19,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://used-car-fair-price-analyzer.vercel.app",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -421,7 +422,7 @@ def predict_price(
                 round(
                     upper_bound
                 ),
-            },
+                },
 
         "interval_method":
             "validation_residual_90_percent",
