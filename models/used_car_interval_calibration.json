@@ -1,0 +1,6 @@
+{
+    "interval_quantile": 0.9,
+    "absolute_log_residual_quantile": 0.23094508712366726,
+    "calibration_split": "validation",
+    "model_version": "catboost-v1"
+}
