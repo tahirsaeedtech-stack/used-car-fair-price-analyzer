@@ -7,3 +7,4 @@ catboost_info/
 # Python cache
 __pycache__/
 *.pyc
+.env

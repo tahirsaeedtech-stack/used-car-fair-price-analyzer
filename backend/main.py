@@ -1,12 +1,40 @@
 from pathlib import Path
 import json
-
 import numpy as np
 import pandas as pd
+import os
+import psycopg
+from dotenv import load_dotenv
 from catboost import CatBoostRegressor, Pool
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+DB_USER = os.getenv("DB_USER")
+DB_PASS = os.getenv("DB_PASS")
+DB_NAME = os.getenv("DB_NAME")
+INSTANCE_UNIX_SOCKET = os.getenv("INSTANCE_UNIX_SOCKET")
+
+
+def get_db_connection():
+    # Production: Google Cloud Run -> Cloud SQL Unix socket
+    if all([DB_USER, DB_PASS, DB_NAME, INSTANCE_UNIX_SOCKET]):
+        return psycopg.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASS,
+            host=INSTANCE_UNIX_SOCKET,
+        )
+
+    # Local development: use DATABASE_URL from .env
+    if DATABASE_URL:
+        return psycopg.connect(DATABASE_URL)
+
+    raise RuntimeError("Database configuration is missing.")
 
 
 app = FastAPI(
@@ -225,23 +253,13 @@ def get_metadata(
 
 
 @app.post("/predict")
-def predict_price(
-    car: CarInput
-):
-    vehicle_age = (
-        REFERENCE_YEAR
-        - car.year
-    )
+def predict_price(car: CarInput):
+    vehicle_age = REFERENCE_YEAR - car.year
 
     if vehicle_age > 0:
-        mileage_per_year = (
-            car.mileage_km
-            / vehicle_age
-        )
+        mileage_per_year = car.mileage_km / vehicle_age
     else:
-        mileage_per_year = (
-            car.mileage_km
-        )
+        mileage_per_year = car.mileage_km
 
     input_data = pd.DataFrame(
         [
@@ -257,27 +275,30 @@ def predict_price(
                 "body_type": car.body_type,
                 "brand": car.brand,
                 "model": car.model,
-                "registration_location":
-                    car.registration_location,
+                "registration_location": car.registration_location,
             }
         ],
-        columns=MODEL_FEATURES
+        columns=MODEL_FEATURES,
     )
 
-    predicted_log_price = model.predict(
-        input_data
-    )[0]
+    # -----------------------------
+    # PRICE PREDICTION
+    # -----------------------------
+
+    predicted_log_price = model.predict(input_data)[0]
 
     predicted_price_pkr = float(
-        np.expm1(
-            predicted_log_price
-        )
+        np.expm1(predicted_log_price)
     )
 
     predicted_price_pkr = max(
         predicted_price_pkr,
-        0
+        0,
     )
+
+    # -----------------------------
+    # CALIBRATED PRICE RANGE
+    # -----------------------------
 
     lower_log = (
         predicted_log_price
@@ -299,24 +320,26 @@ def predict_price(
 
     lower_bound = max(
         lower_bound,
-        0
+        0,
     )
 
     upper_bound = max(
         upper_bound,
-        0
+        0,
     )
+
+    # -----------------------------
+    # SHAP EXPLAINABILITY
+    # -----------------------------
 
     prediction_pool = Pool(
         input_data,
-        cat_features=CATEGORICAL_FEATURES
+        cat_features=CATEGORICAL_FEATURES,
     )
 
-    shap_values = (
-        model.get_feature_importance(
-            prediction_pool,
-            type="ShapValues"
-        )
+    shap_values = model.get_feature_importance(
+        prediction_pool,
+        type="ShapValues",
     )
 
     feature_shap_values = (
@@ -325,34 +348,27 @@ def predict_price(
 
     explanations = []
 
-    for (
-        feature_name,
-        shap_value
-    ) in zip(
+    for feature_name, shap_value in zip(
         MODEL_FEATURES,
-        feature_shap_values
+        feature_shap_values,
     ):
-        raw_value = (
-            input_data.iloc[0][
-                feature_name
-            ]
-        )
+        raw_value = input_data.iloc[0][
+            feature_name
+        ]
 
         if pd.isna(raw_value):
             display_value = None
 
         elif isinstance(
             raw_value,
-            np.generic
+            np.generic,
         ):
             display_value = (
                 raw_value.item()
             )
 
         else:
-            display_value = (
-                raw_value
-            )
+            display_value = raw_value
 
         if shap_value > 0:
             direction = (
@@ -365,79 +381,35 @@ def predict_price(
             )
 
         else:
-            direction = (
-                "NEUTRAL"
-            )
+            direction = "NEUTRAL"
 
         explanations.append(
             {
-                "feature":
-                    feature_name,
-
-                "value":
-                    display_value,
-
-                "impact":
-                    round(
-                        float(
-                            shap_value
-                        ),
-                        4
-                    ),
-
-                "direction":
-                    direction,
+                "feature": feature_name,
+                "value": display_value,
+                "impact": round(
+                    float(shap_value),
+                    4,
+                ),
+                "direction": direction,
             }
         )
 
     explanations = sorted(
         explanations,
-        key=lambda item:
-            abs(
-                item["impact"]
-            ),
-        reverse=True
+        key=lambda item: abs(
+            item["impact"]
+        ),
+        reverse=True,
     )[:5]
 
-    response = {
-        "predicted_price_pkr":
-            round(
-                predicted_price_pkr
-            ),
+    # -----------------------------
+    # ASKING PRICE ANALYSIS
+    # -----------------------------
 
-        "predicted_price_million":
-            round(
-                predicted_price_pkr
-                / 1_000_000,
-                2
-            ),
+    assessment = None
 
-        "fair_price_range": {
-            "min_pkr":
-                round(
-                    lower_bound
-                ),
-
-            "max_pkr":
-                round(
-                    upper_bound
-                ),
-                },
-
-        "interval_method":
-            "validation_residual_90_percent",
-
-        "model_version":
-            "catboost-v1",
-
-        "price_drivers":
-            explanations,
-    }
-
-    if (
-        car.asking_price_pkr
-        is not None
-    ):
+    if car.asking_price_pkr is not None:
         difference_pkr = (
             car.asking_price_pkr
             - predicted_price_pkr
@@ -452,44 +424,117 @@ def predict_price(
             car.asking_price_pkr
             > upper_bound
         ):
-            assessment = (
-                "OVERPRICED"
-            )
+            assessment = "OVERPRICED"
 
         elif (
             car.asking_price_pkr
             < lower_bound
         ):
-            assessment = (
-                "UNDERPRICED"
-            )
+            assessment = "UNDERPRICED"
 
         else:
-            assessment = (
-                "FAIR_PRICE"
+            assessment = "FAIR_PRICE"
+
+    # -----------------------------
+    # SAVE PREDICTION TO POSTGRESQL
+    # -----------------------------
+
+    if DATABASE_URL or all(
+        [DB_USER, DB_PASS, DB_NAME, INSTANCE_UNIX_SOCKET]
+    ):
+        try:
+            with get_db_connection() as conn:
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO predictions (
+                            brand,
+                            model,
+                            year,
+                            mileage_km,
+                            predicted_price_pkr,
+                            lower_bound_pkr,
+                            upper_bound_pkr,
+                            asking_price_pkr,
+                            assessment
+                        )
+                        VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s
+                        )
+                        """,
+                        (
+                            car.brand,
+                            car.model,
+                            car.year,
+                            car.mileage_km,
+                            predicted_price_pkr,
+                            lower_bound,
+                            upper_bound,
+                            car.asking_price_pkr,
+                            assessment,
+                        ),
+                    )
+
+        except Exception as exc:
+            print(
+                "Database insert failed:",
+                exc,
             )
 
+    # -----------------------------
+    # API RESPONSE
+    # -----------------------------
+
+    response = {
+        "predicted_price_pkr": round(
+            predicted_price_pkr
+        ),
+
+        "predicted_price_million": round(
+            predicted_price_pkr
+            / 1_000_000,
+            2,
+        ),
+
+        "fair_price_range": {
+            "min_pkr": round(
+                lower_bound
+            ),
+            "max_pkr": round(
+                upper_bound
+            ),
+        },
+
+        "interval_method":
+            "validation_residual_90_percent",
+
+        "model_version":
+            "catboost-v1",
+
+        "price_drivers":
+            explanations,
+    }
+
+    if car.asking_price_pkr is not None:
         response[
             "asking_price_analysis"
         ] = {
-            "asking_price_pkr":
-                round(
-                    car.asking_price_pkr
-                ),
+            "asking_price_pkr": round(
+                car.asking_price_pkr
+            ),
 
-            "difference_pkr":
-                round(
-                    difference_pkr
-                ),
+            "difference_pkr": round(
+                difference_pkr
+            ),
 
-            "difference_percent":
-                round(
-                    difference_percent,
-                    2
-                ),
+            "difference_percent": round(
+                difference_percent,
+                2,
+            ),
 
-            "assessment":
-                assessment,
+            "assessment": assessment,
         }
 
     return response
