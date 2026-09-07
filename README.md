@@ -21,6 +21,13 @@ https://used-car-price-backend-720530335077.asia-south1.run.app
 
 ---
 
+## 📸 Application Preview
+
+![Used Car Fair Price Analyzer - ML prediction, uncertainty range and SHAP explainability](docs/images/used-car-analyzer-demo.png)
+
+The production application provides a predicted fair price, validation-calibrated price range, asking-price assessment, and SHAP-based explanation of the strongest factors influencing each prediction.
+
+
 ## 🎯 Problem
 
 Used-car asking prices can vary considerably depending on vehicle age, mileage, engine size, brand, model, transmission, assembly type, registration location, and other characteristics.
